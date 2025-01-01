@@ -24,9 +24,7 @@ def get_client_config():
         print(f"Retrieved client_id (first 8 chars): {client_id[:8]}...")
         print(f"Retrieved client_secret (first 8 chars): {client_secret[:8]}...")
         
-        # Use the exact Azure Databricks URL
-        redirect_uri = "https://adb-2449401244759216.16.azuredatabricks.net/oauth2/callback"
-        
+        # Use the same configuration structure that works locally
         config = {
             "web": {
                 "client_id": client_id,
@@ -34,23 +32,9 @@ def get_client_config():
                 "auth_uri": "https://accounts.google.com/o/oauth2/auth",
                 "token_uri": "https://oauth2.googleapis.com/token",
                 "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-                "redirect_uris": [redirect_uri]
+                "redirect_uris": ["http://localhost:8080"]  # Use only localhost as in local version
             }
         }
-        
-        # Debug: Print configuration structure (without sensitive values)
-        debug_config = {
-            "web": {
-                "client_id": "***",
-                "client_secret": "***",
-                "auth_uri": config["web"]["auth_uri"],
-                "token_uri": config["web"]["token_uri"],
-                "auth_provider_x509_cert_url": config["web"]["auth_provider_x509_cert_url"],
-                "redirect_uris": config["web"]["redirect_uris"]
-            }
-        }
-        print("\nConfiguration structure:")
-        print(json.dumps(debug_config, indent=2))
         
         return config
         
@@ -62,7 +46,7 @@ def get_client_config():
 def get_credentials() -> Optional[Credentials]:
     """Gets valid user credentials from storage or initiates OAuth2 flow."""
     try:
-        # Get client configuration with secrets
+        # Get client configuration
         client_config = get_client_config()
         
         # Try to get existing refresh token from the notebook-scoped variable
@@ -70,7 +54,6 @@ def get_credentials() -> Optional[Credentials]:
             refresh_token = saved_refresh_token
             print("Using existing refresh token from notebook variable")
             
-            # Create credentials from refresh token
             credentials = Credentials(
                 None,  # No access token since we'll refresh it
                 refresh_token=refresh_token,
@@ -98,17 +81,14 @@ def perform_oauth_flow() -> Optional[Credentials]:
     try:
         print("Starting OAuth flow...")
         
-        # Get client configuration with secrets
+        # Get client configuration
         client_config = get_client_config()
         
-        # Get the redirect URI from the config
-        redirect_uri = client_config['web']['redirect_uris'][0]
-        
-        # Create flow instance for web application
+        # Create flow instance - use localhost like in local version
         flow = Flow.from_client_config(
             client_config,
             scopes=SCOPES,
-            redirect_uri=redirect_uri
+            redirect_uri="http://localhost:8080"
         )
         
         # Generate authorization URL
@@ -124,8 +104,8 @@ def perform_oauth_flow() -> Optional[Credentials]:
             <h3>Please follow these steps:</h3>
             <ol>
                 <li>Visit this URL to authorize the application: <a href="{auth_url}" target="_blank">Click here to authenticate</a></li>
-                <li>After authorization, you'll be redirected to {redirect_uri}</li>
-                <li>Copy the ENTIRE URL from your browser's address bar after being redirected (even if the page shows an error) and paste it below</li>
+                <li>After authorization, you'll be redirected to localhost:8080</li>
+                <li>Copy the ENTIRE URL from your browser's address bar (even if the page shows an error) and paste it below</li>
             </ol>
         </div>
         """
@@ -153,7 +133,7 @@ def perform_oauth_flow() -> Optional[Credentials]:
         print(f"Error during OAuth flow: {str(e)}")
         return None
 
-# For Databricks, we need to allow insecure transport for OAuth testing
+# For OAuth testing
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
 # Get the credentials
