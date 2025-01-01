@@ -2,16 +2,22 @@
 
 # COMMAND ----------
 # MAGIC %md
-# MAGIC # Download Non-Short YouTube Videos For All Channels
+# MAGIC # YouTube Bulk Download with Additional Columns for Next Steps
 # MAGIC 
-# MAGIC This code:
-# MAGIC 1. Gets cookies from DBFS
-# MAGIC 2. For each channel in `channel_statistics`, fetches up to 20 recent uploads
-# MAGIC 3. Skips those <60s (Shorts)
-# MAGIC 4. Downloads up to 10 of them using fresh cookies and standard JS extraction
-# MAGIC 5. Uploads the video file to Azure Blob
-# MAGIC 
-# MAGIC **No impersonation** used, so we avoid the `Impersonate target not available` error.
+# MAGIC 1. **Creates** (or uses) a Delta table `channel_processed_videos` in the same schema `yt-deslopify`.default.
+# MAGIC 2. Adds extra columns to track additional metadata about each download:
+# MAGIC    - `channel_id`: from the channel URL  
+# MAGIC    - `channel_name`  
+# MAGIC    - `channel_url`  
+# MAGIC    - `video_id`  
+# MAGIC    - `video_title`  
+# MAGIC    - `video_duration` (seconds)  
+# MAGIC    - `azure_blob_name` (filename in container)  
+# MAGIC    - `downloaded_timestamp`  
+# MAGIC 3. **Skips** already-processed videos.
+# MAGIC 4. Skips shorts (<60s).
+# MAGIC 5. **Random sleeps** between channels to reduce potential bot triggers.
+# MAGIC 6. **Uploads** files to Azure Blob Storage, using a fresh cookies file for YouTube authentication.
 
 # COMMAND ----------
 import os
@@ -29,10 +35,9 @@ from googleapiclient.discovery import build
 
 # COMMAND ----------
 # MAGIC %md
-# MAGIC ## Copy Cookies File from DBFS
+# MAGIC ## 1. Copy Cookies File from DBFS
 
 # COMMAND ----------
-# Adjust path as needed if your cookies are in a different location
 dbutils.fs.cp(
     "dbfs:/Volumes/yt-deslopify/default/youtube/cookies/www.youtube.com_cookies.txt",
     "file:/tmp/youtube_cookies.txt",
@@ -42,14 +47,59 @@ dbutils.fs.cp(
 COOKIE_FILE = "/tmp/youtube_cookies.txt"
 if not os.path.exists(COOKIE_FILE):
     raise FileNotFoundError(
-        f"Cookies file not found at {COOKIE_FILE}. "
-        "Ensure it was copied successfully from DBFS!"
+        f"Cookies file not found at {COOKIE_FILE}. Ensure it was copied successfully!"
     )
 print(f"Cookie file is at {COOKIE_FILE}")
 
 # COMMAND ----------
 # MAGIC %md
-# MAGIC ## Grab All Channels from Table
+# MAGIC ## 2. Create/Alter the Processed Table with Additional Columns
+
+# COMMAND ----------
+# We'll store these fields in `channel_processed_videos`.
+# If you already have an older table, we'll do an ALTER to add missing columns.
+
+spark.sql("""
+    CREATE TABLE IF NOT EXISTS `yt-deslopify`.default.channel_processed_videos (
+        channel_id          STRING,
+        channel_name        STRING,
+        channel_url         STRING,
+        video_id            STRING,
+        video_title         STRING,
+        video_duration      INT,
+        azure_blob_name     STRING,
+        downloaded_timestamp TIMESTAMP
+    )
+    USING delta
+""")
+
+# Optionally, ensure we have all columns (just in case).
+# For example, if the table already existed, you can do:
+existing_cols = set(row['col_name'].lower() for row in spark.sql(
+    "DESCRIBE TABLE `yt-deslopify`.default.channel_processed_videos"
+).collect())
+
+expected_cols = {
+    'channel_id', 'channel_name', 'channel_url',
+    'video_id', 'video_title', 'video_duration',
+    'azure_blob_name', 'downloaded_timestamp'
+}
+
+missing_cols = expected_cols - existing_cols
+for col in missing_cols:
+    # We'll pick simple data types for missing columns
+    if col == 'video_duration':
+        spark.sql(f"ALTER TABLE `yt-deslopify`.default.channel_processed_videos ADD COLUMNS ({col} INT)")
+    elif col == 'downloaded_timestamp':
+        spark.sql(f"ALTER TABLE `yt-deslopify`.default.channel_processed_videos ADD COLUMNS ({col} TIMESTAMP)")
+    else:
+        spark.sql(f"ALTER TABLE `yt-deslopify`.default.channel_processed_videos ADD COLUMNS ({col} STRING)")
+
+print("Ensured table `yt-deslopify`.default.channel_processed_videos with new columns")
+
+# COMMAND ----------
+# MAGIC %md
+# MAGIC ## 3. Grab Channels from `channel_statistics`
 
 # COMMAND ----------
 channel_df = spark.sql("""
@@ -61,17 +111,16 @@ channel_df = spark.sql("""
 channels = channel_df.collect()
 channel_count = len(channels)
 if channel_count == 0:
-    raise Exception("No channels found in table with valid URL")
+    raise Exception("No channels found in `channel_statistics` with a valid URL")
 
-print(f"Found {channel_count} channels.")
+print(f"Found {channel_count} channels to process.")
 
 # COMMAND ----------
 # MAGIC %md
-# MAGIC ## YouTube Data API Helpers
+# MAGIC ## 4. YouTube Helpers (API + Short-Skipping)
 
 # COMMAND ----------
 def get_youtube_api_key():
-    """Fetch your YouTube Data API key from Azure Key Vault."""
     credential = DefaultAzureCredential()
     key_vault_url = "https://gattaca-keys.vault.azure.net/"
     secret_client = SecretClient(vault_url=key_vault_url, credential=credential)
@@ -79,31 +128,32 @@ def get_youtube_api_key():
 
 def parse_iso8601_duration(duration_str):
     """
-    Convert e.g. 'PT5M33S', 'PT1H2M3S' → int seconds.
+    e.g. 'PT1H2M3S' -> int seconds
     """
     match = re.match(r'^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$', duration_str)
     if not match:
         return 0
     hours = int(match.group(1) or 0)
-    mins = int(match.group(2) or 0)
-    secs = int(match.group(3) or 0)
+    mins  = int(match.group(2) or 0)
+    secs  = int(match.group(3) or 0)
     return hours * 3600 + mins * 60 + secs
 
 def get_nonshort_videos(channel_url, max_results=20):
     """
-    For a channel's 'uploads' playlist:
-      - Grab up to 'max_results' items
-      - Get each video's duration from videos().list
-      - Return only those >=60s
+    1) Find channel ID from channel_url
+    2) Get up to max_results from 'uploads' playlist
+    3) Calls videos().list to get contentDetails.duration
+    4) Skip <60s
+    5) Return list of {id, title, url, duration_in_sec}
     """
     youtube = build('youtube', 'v3', developerKey=get_youtube_api_key())
     
-    # Extract channel ID from the URL
     channel_id = channel_url.strip().split('/')[-1]
     ch_resp = youtube.channels().list(part='contentDetails', id=channel_id).execute()
     if not ch_resp.get('items'):
-        print(f"Channel not found: ID={channel_id}")
+        print(f"No channel found for ID={channel_id}")
         return []
+    
     playlist_id = ch_resp['items'][0]['contentDetails']['relatedPlaylists']['uploads']
     
     videos = []
@@ -116,7 +166,7 @@ def get_nonshort_videos(channel_url, max_results=20):
         resp = req.execute()
         for item in resp.get('items', []):
             vid_id = item['snippet']['resourceId']['videoId']
-            title = item['snippet']['title']
+            title  = item['snippet']['title']
             videos.append({
                 'id': vid_id,
                 'title': title,
@@ -124,20 +174,25 @@ def get_nonshort_videos(channel_url, max_results=20):
             })
         req = youtube.playlistItems().list_next(req, resp)
     
+    # Now get durations
     if not videos:
         return []
     
-    # chunk in up to 50
-    filtered = []
+    chunked = []
     for i in range(0, len(videos), 50):
         chunk = videos[i:i+50]
+        chunked.append(chunk)
+    
+    filtered = []
+    for chunk in chunked:
         ids_str = ",".join(v['id'] for v in chunk)
         det_resp = youtube.videos().list(part='contentDetails', id=ids_str).execute()
+        
         dur_map = {}
         for vi in det_resp.get('items', []):
-            vid = vi['id']
-            iso_dur = vi['contentDetails']['duration']
-            dur_map[vid] = parse_iso8601_duration(iso_dur)
+            v_id = vi['id']
+            iso_str = vi['contentDetails']['duration']
+            dur_map[v_id] = parse_iso8601_duration(iso_str)
         
         for v in chunk:
             dur_s = dur_map.get(v['id'], 0)
@@ -146,28 +201,28 @@ def get_nonshort_videos(channel_url, max_results=20):
                 filtered.append(v)
             else:
                 print(f"Skipping short (<60s): {v['title']} (ID={v['id']}, {dur_s}s)")
+    
     return filtered
 
 # COMMAND ----------
 # MAGIC %md
-# MAGIC ## YT-DLP Download + Upload Helper
+# MAGIC ## 5. YT-DLP Download + Upload Helper
 
 # COMMAND ----------
-def download_and_upload_video(video_info, channel_name, cookiefile):
+def download_and_upload_video(video_info, channel_name, channel_id, cookiefile):
     """
-    Try multiple mp4-based formats, with standard headers/cookies,
-    and upload to Azure.
+    Try multiple mp4-based formats, normal JS extraction,
+    then upload to Azure. Return the Azure blob name.
     """
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Safe local filename
+            # Prepare a safe local filename
             now = datetime.now().strftime('%Y%m%d_%H%M%S')
             sc = "".join(c for c in channel_name if c.isalnum() or c in (' ', '-', '_')).strip()
             sv = "".join(c for c in video_info['title'] if c.isalnum() or c in (' ', '-', '_')).strip()
             filename = f"{sc}_{sv}_{now}.mp4"
             out_path = os.path.join(tmpdir, filename)
             
-            # Use normal browser-like headers
             HEADERS = {
                 'User-Agent': (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -177,21 +232,16 @@ def download_and_upload_video(video_info, channel_name, cookiefile):
                 'Accept-Language': 'en-US,en;q=0.9'
             }
             
-            # Just do the basic 3 fallback format combos
             fmt_opts = [
                 'best[ext=mp4]',
                 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
                 'worstvideo[ext=mp4]+worstaudio[ext=m4a]',
             ]
             
-            # We'll keep the advanced "extractor_args" minimal
-            # if we want to force multiple clients:
-            # 'youtube': { 'player_client': ['web','ios','mweb','tv','android'] }
+            # Example advanced extractor args
             ex_args = {
                 'youtube': {
-                    # This is optional. If it doesn't help,
-                    # you can remove it entirely.
-                    'player_client': ['web','mweb','android','ios','tv']
+                    'player_client': ['web','mweb','ios','android','tv']
                 }
             }
             
@@ -208,14 +258,11 @@ def download_and_upload_video(video_info, channel_name, cookiefile):
                 'retries': 5,
                 'fragment_retries': 5,
                 'http_headers': HEADERS,
-                'extractor_args': ex_args,
-                
-                # No impersonate argument
+                'extractor_args': ex_args
             }
             
             success = False
             last_err = None
-            
             for fm in fmt_opts:
                 try:
                     print(f"\nAttempting format: {fm}")
@@ -234,7 +281,7 @@ def download_and_upload_video(video_info, channel_name, cookiefile):
                     f"All format attempts failed for {video_info['url']}.\n{last_err}"
                 )
             
-            # Upload to Azure Blob
+            # Upload to azure
             account_url = "https://gattacav2.blob.core.windows.net"
             credential = DefaultAzureCredential()
             service_client = BlobServiceClient(account_url=account_url, credential=credential)
@@ -245,7 +292,7 @@ def download_and_upload_video(video_info, channel_name, cookiefile):
             with open(out_path, 'rb') as fh:
                 blob_client.upload_blob(name=filename, data=fh, overwrite=True)
             
-            print(f"Uploaded: {filename}")
+            print(f"Upload done: {filename}")
             return filename
     except Exception as e:
         print(f"Error in download_and_upload_video: {e}")
@@ -253,38 +300,86 @@ def download_and_upload_video(video_info, channel_name, cookiefile):
 
 # COMMAND ----------
 # MAGIC %md
-# MAGIC ## Main Loop Over Channels
+# MAGIC ## 6. Main Loop Over Channels with Crash Resistance
 
 # COMMAND ----------
 import random
 import time
 
 try:
+    # load existing processed
+    # note that we only fetch video_id because we also want to track channel_id etc. 
+    # but for duplicates, we care about video_id
+    processed_df = spark.sql("SELECT video_id FROM `yt-deslopify`.default.channel_processed_videos")
+    processed_ids = set(row['video_id'] for row in processed_df.collect())
+    
     for idx, row in enumerate(channels, start=1):
         ch_name = row["name"]
         ch_url  = row["url"]
+        ch_id   = ch_url.strip().split('/')[-1]  # simple parsing from channel URL
         
         print(f"\n=== Channel {idx}/{channel_count} ===")
-        print(f"Name: {ch_name}\nURL : {ch_url}")
+        print(f"Name: {ch_name}\nURL : {ch_url}\nID  : {ch_id}")
         
-        # fetch up to 20 uploads, skip <60s
         all_nonshort = get_nonshort_videos(ch_url, max_results=20)
         if not all_nonshort:
-            print("No non-short videos found or channel invalid. Skipping.\n")
+            print("No non-short videos or channel invalid. Skipping.\n")
             continue
         
-        to_download = all_nonshort[:10]  # up to 10
-        print(f"Found {len(all_nonshort)} non-short videos. Will download up to {len(to_download)}.\n")
+        # skip duplicates
+        new_videos = [v for v in all_nonshort if v['id'] not in processed_ids]
+        if not new_videos:
+            print("All found videos are already processed. Skipping.\n")
+            continue
+        
+        # take up to 10
+        to_download = new_videos[:3]
+        print(f"Found {len(all_nonshort)} non-short videos, {len(new_videos)} are new. Will download {len(to_download)}.\n")
         
         for i, vid_info in enumerate(to_download, start=1):
             print(f"--- Video {i}/{len(to_download)} for '{ch_name}' ---")
             print(f"Title: {vid_info['title']}")
             print(f"URL  : {vid_info['url']}")
-            fn = download_and_upload_video(vid_info, ch_name, COOKIE_FILE)
-            print(f" -> Done: {fn}\n")
+            
+            azure_filename = download_and_upload_video(vid_info, ch_name, ch_id, COOKIE_FILE)
+            print(f" -> Done: {azure_filename}\n")
+            
+            # Insert row in `channel_processed_videos`
+            safe_title  = vid_info['title'].replace("'", "''")
+            safe_name   = ch_name.replace("'", "''")
+            safe_ch_url = ch_url.replace("'", "''")
+            safe_ch_id  = ch_id.replace("'", "''")
+            safe_vid_id = vid_info['id'].replace("'", "''")
+            
+            spark.sql(f"""
+                INSERT INTO `yt-deslopify`.default.channel_processed_videos
+                (
+                    channel_id,
+                    channel_name,
+                    channel_url,
+                    video_id,
+                    video_title,
+                    video_duration,
+                    azure_blob_name,
+                    downloaded_timestamp
+                )
+                VALUES (
+                    '{safe_ch_id}',
+                    '{safe_name}',
+                    '{safe_ch_url}',
+                    '{safe_vid_id}',
+                    '{safe_title}',
+                     {vid_info['duration_in_sec']},
+                    '{azure_filename}',
+                     current_timestamp()
+                )
+            """)
+            
+            # Add to local set so we skip if the job continues
+            processed_ids.add(vid_info['id'])
         
+        # random sleep between channels
         if idx < channel_count:
-            # Sleep random 10-40 seconds between channels
             snooze = random.randint(10, 40)
             print(f"Sleeping {snooze}s before next channel...\n")
             time.sleep(snooze)
