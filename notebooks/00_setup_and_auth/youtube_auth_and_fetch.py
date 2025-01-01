@@ -20,21 +20,44 @@ def get_client_config():
         client_id = dbutils.secrets.get(scope="youtube-secrets", key="client-id")
         client_secret = dbutils.secrets.get(scope="youtube-secrets", key="client-secret")
         
-        # Debug: Print partial values for verification
-        print(f"Retrieved client_id (first 8 chars): {client_id[:8]}...")
-        print(f"Retrieved client_secret (first 8 chars): {client_secret[:8]}...")
+        # Debug: Print values for verification (length and content)
+        print(f"Retrieved client_id length: {len(client_id)}")
+        print(f"Expected client_id length: 73")  # Length of the working client ID
+        print(f"Retrieved client_secret length: {len(client_secret)}")
+        print(f"Expected client_secret length: 35")  # Length of the working client secret
         
-        # Use the same configuration structure that works locally
+        # Check for any whitespace or special characters
+        if client_id.strip() != client_id:
+            print("Warning: client_id contains leading/trailing whitespace")
+            client_id = client_id.strip()
+        
+        if client_secret.strip() != client_secret:
+            print("Warning: client_secret contains leading/trailing whitespace")
+            client_secret = client_secret.strip()
+        
         config = {
             "web": {
                 "client_id": client_id,
-                "client_secret": client_secret,
+                "project_id": "sylvan-apogee-446511-t4",
                 "auth_uri": "https://accounts.google.com/o/oauth2/auth",
                 "token_uri": "https://oauth2.googleapis.com/token",
                 "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-                "redirect_uris": ["http://localhost:8080"]  # Use only localhost as in local version
+                "client_secret": client_secret,
+                "redirect_uris": [
+                    "http://localhost:8080",
+                    "https://localhost:8080/oauth2callback",
+                    "https://adb-2449401244759216.16.azuredatabricks.net/oauth2/callback"
+                ]
             }
         }
+        
+        # Print the first and last few characters of each value
+        print("\nClient ID check:")
+        print(f"First 10 chars: {client_id[:10]}")
+        print(f"Last 10 chars: {client_id[-10:]}")
+        print("\nClient Secret check:")
+        print(f"First 10 chars: {client_secret[:10]}")
+        print(f"Last 5 chars: {client_secret[-5:]}")
         
         return config
         
@@ -84,11 +107,11 @@ def perform_oauth_flow() -> Optional[Credentials]:
         # Get client configuration
         client_config = get_client_config()
         
-        # Create flow instance - use localhost like in local version
+        # Create flow instance for web application
         flow = Flow.from_client_config(
             client_config,
             scopes=SCOPES,
-            redirect_uri="http://localhost:8080"
+            redirect_uri="http://localhost:8080"  # Use localhost for initial auth
         )
         
         # Generate authorization URL
@@ -105,7 +128,7 @@ def perform_oauth_flow() -> Optional[Credentials]:
             <ol>
                 <li>Visit this URL to authorize the application: <a href="{auth_url}" target="_blank">Click here to authenticate</a></li>
                 <li>After authorization, you'll be redirected to localhost:8080</li>
-                <li>Copy the ENTIRE URL from your browser's address bar (even if the page shows an error) and paste it below</li>
+                <li>Copy the ENTIRE URL from your browser's address bar and paste it below</li>
             </ol>
         </div>
         """
@@ -113,7 +136,7 @@ def perform_oauth_flow() -> Optional[Credentials]:
         
         # Get the full redirect URL from user
         redirect_response = input("Enter the full redirect URL: ")
-        print(f"\nProcessing redirect URL...")
+        print("\nProcessing redirect URL...")
         
         # Exchange the authorization response for credentials
         flow.fetch_token(authorization_response=redirect_response)
