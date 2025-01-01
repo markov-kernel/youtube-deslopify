@@ -65,6 +65,12 @@ def analyze_channel_statistics(watch_history):
     Analyze channel statistics from watch history data.
     Returns a dictionary containing various channel-related statistics.
     """
+    # Create a mapping of channel names to their URLs
+    channel_urls = {}
+    for entry in watch_history:
+        if 'channel' in entry and 'channel_url' in entry:
+            channel_urls[entry['channel']] = entry['channel_url']
+
     # Extract all channels
     channels = [entry['channel'] for entry in watch_history if 'channel' in entry]
     channel_counts = Counter(channels)
@@ -86,6 +92,17 @@ def analyze_channel_statistics(watch_history):
         for channel, count in top_channels
     ]
     
+    # Get top 50 channel URLs
+    top_50_channels = channel_counts.most_common(50)
+    top_50_channel_urls = [
+        {
+            'channel': channel,
+            'url': channel_urls.get(channel, ''),
+            'views': count
+        }
+        for channel, count in top_50_channels
+    ]
+    
     # Get channels by view count distribution
     view_distribution = {
         '1 view': sum(1 for count in channel_counts.values() if count == 1),
@@ -105,6 +122,7 @@ def analyze_channel_statistics(watch_history):
         'total_videos': total_views,
         'unique_channels': unique_channels,
         'top_channels': top_channels_with_percentage,
+        'top_50_channel_urls': top_50_channel_urls,
         'view_distribution': view_distribution,
         'all_channels': sorted(all_channels, key=lambda x: x['views'], reverse=True)
     }
