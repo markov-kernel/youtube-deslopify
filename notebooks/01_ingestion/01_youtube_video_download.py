@@ -78,17 +78,23 @@ except Exception as e:
 # MAGIC ## 1. Copy Cookies File from DBFS to Local
 
 # COMMAND ----------
-dbutils.fs.cp(
-    "dbfs:/Volumes/yt-deslopify/default/youtube/cookies/www.youtube.com_cookies.txt",
-    "file:/tmp/youtube_cookies.txt",
-    recurse=False
-)
-
+# Ensure cookies file exists and is accessible
+cookie_dbfs_path = "dbfs:/Volumes/yt-deslopify/default/youtube/cookies/www.youtube.com_cookies.txt"
 local_cookiefile = "/tmp/youtube_cookies.txt"
+
+# Copy cookies file from DBFS to local
+dbutils.fs.cp(cookie_dbfs_path, f"file:{local_cookiefile}", recurse=False)
+
 if not os.path.exists(local_cookiefile):
-    raise FileNotFoundError(f"Cookies file not found at {local_cookiefile}. "
-                            "Ensure it was copied successfully.")
-print(f"Cookie file present at {local_cookiefile}")
+    raise FileNotFoundError(f"Cookies file not found at {local_cookiefile}")
+
+# Verify file has content
+with open(local_cookiefile, 'r') as f:
+    cookie_content = f.read().strip()
+    if not cookie_content:
+        raise ValueError("Cookie file exists but is empty!")
+    
+print(f"Cookie file present and verified at {local_cookiefile}")
 
 # COMMAND ----------
 # MAGIC %md
@@ -198,8 +204,9 @@ def download_and_upload_audio_mp3_lowq(video_info, channel_name, cookies_path, f
             out_path = os.path.join(tmpdir, filename)
             
             ydl_opts = {
-                'outtmpl': out_path[:-4],  # Remove .mp3 as yt-dlp will add it after extraction
+                'outtmpl': out_path[:-4],  # Remove .mp3 as yt-dlp will add it
                 'cookiefile': cookies_path,
+                'cookiesfrombrowser': None,  # Don't try browser cookies
                 'format': 'bestaudio/best',
                 # Re-encode audio to mp3 64 kbps
                 'postprocessors': [{
@@ -207,9 +214,22 @@ def download_and_upload_audio_mp3_lowq(video_info, channel_name, cookies_path, f
                     'preferredcodec': 'mp3',
                     'preferredquality': '64'
                 }],
-                'ffmpeg_location': ffmpeg_path,  # Directory containing ffmpeg/ffprobe
+                'ffmpeg_location': ffmpeg_path,
                 'quiet': False,
-                'no_warnings': False
+                'no_warnings': False,
+                # Additional options to help bypass bot detection
+                'sleep_interval': 5,  # Increased sleep between requests
+                'max_sleep_interval': 10,
+                'sleep_interval_requests': 3,
+                'geo_bypass': True,
+                'geo_bypass_country': 'US',
+                'extractor_retries': 5,  # Retry more times
+                'http_headers': {  # Mimic a real browser
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept-Language': 'en-us,en;q=0.5',
+                    'Sec-Fetch-Mode': 'navigate'
+                }
             }
 
             print(f"Downloading and converting to MP3: {video_info['title']}")
