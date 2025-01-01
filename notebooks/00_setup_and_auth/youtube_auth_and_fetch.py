@@ -15,25 +15,21 @@ from IPython.display import HTML, display
 SCOPES = ['https://www.googleapis.com/auth/youtube.readonly']
 
 def get_client_config():
-    """Retrieve client configuration from Databricks secrets."""
+    """Get the client configuration from either Databricks secrets or local file."""
     try:
-        client_id = dbutils.secrets.get(scope="youtube-secrets", key="client-id")
-        client_secret = dbutils.secrets.get(scope="youtube-secrets", key="client-secret")
-        
-        # Debug: Print values for verification (length and content)
-        print(f"Retrieved client_id length: {len(client_id)}")
-        print(f"Expected client_id length: 73")  # Length of the working client ID
-        print(f"Retrieved client_secret length: {len(client_secret)}")
-        print(f"Expected client_secret length: 35")  # Length of the working client secret
-        
-        # Check for any whitespace or special characters
-        if client_id.strip() != client_id:
-            print("Warning: client_id contains leading/trailing whitespace")
-            client_id = client_id.strip()
-        
-        if client_secret.strip() != client_secret:
-            print("Warning: client_secret contains leading/trailing whitespace")
-            client_secret = client_secret.strip()
+        # First try to get from Databricks secrets
+        try:
+            client_id = dbutils.secrets.get(scope="youtube-secrets", key="client-id")
+            client_secret = dbutils.secrets.get(scope="youtube-secrets", key="client-secret")
+            print("Using Databricks secrets for authentication")
+        except Exception as e:
+            # If Databricks secrets fail, try to load from local file
+            print("Databricks secrets not available, trying local config file")
+            with open('client_secrets.json', 'r') as f:
+                local_config = json.load(f)
+                client_id = local_config['web']['client_id']
+                client_secret = local_config['web']['client_secret']
+            print("Using local client_secrets.json for authentication")
         
         config = {
             "web": {
@@ -51,19 +47,17 @@ def get_client_config():
             }
         }
         
-        # Print the first and last few characters of each value
-        print("\nClient ID check:")
-        print(f"First 10 chars: {client_id[:10]}")
-        print(f"Last 10 chars: {client_id[-10:]}")
-        print("\nClient Secret check:")
-        print(f"First 10 chars: {client_secret[:10]}")
-        print(f"Last 5 chars: {client_secret[-5:]}")
+        # Print debug info without exposing secrets
+        debug_config = json.loads(json.dumps(config))
+        debug_config['web']['client_id'] = f"{client_id[:8]}...{client_id[-4:]}"
+        debug_config['web']['client_secret'] = f"{client_secret[:8]}...{client_secret[-4:]}"
+        print("\nConfiguration structure:")
+        print(json.dumps(debug_config, indent=2))
         
         return config
         
     except Exception as e:
-        print("Error accessing secrets or configuration.")
-        print(f"Error details: {str(e)}")
+        print(f"Error getting client configuration: {str(e)}")
         raise
 
 def get_credentials() -> Optional[Credentials]:

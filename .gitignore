@@ -2,8 +2,8 @@
 __pycache__/
 *.py[cod]
 *$py.class
-*.so
 .Python
+env/
 build/
 develop-eggs/
 dist/
@@ -15,7 +15,6 @@ lib64/
 parts/
 sdist/
 var/
-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
@@ -23,7 +22,6 @@ wheels/
 # Virtual Environment
 .env
 .venv
-env/
 venv/
 ENV/
 
@@ -33,28 +31,17 @@ ENV/
 *.swp
 *.swo
 
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# Databricks
-*.dbc
-
 # Secrets and credentials
-token.pickle
-*.json
-credentials.json
 client_secrets.json
-*_secret*
-*_token*
-
-# Local development
-.DS_Store
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
-.databricks
+token.json
+*.key
+credentials.json
+.secrets/
 
 # Databricks
-.dbrc
-/Users/olivierdebeufderijcker/Documents/GitHub/youtube-deslopify/.databricks
+.databricks/
+*.dbfs/
+
+# Misc
+.DS_Store
+Thumbs.db
