@@ -6,6 +6,8 @@
 from google_auth_oauthlib.flow import Flow
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
+from azure.keyvault.secrets import SecretClient
+from azure.identity import DefaultAzureCredential
 import os
 import json
 from typing import Optional
@@ -14,22 +16,19 @@ from IPython.display import HTML, display
 # OAuth 2.0 scopes that we'll need for accessing playlists
 SCOPES = ['https://www.googleapis.com/auth/youtube.readonly']
 
+# Azure Key Vault configuration
+KEY_VAULT_URL = "https://gattaca-keys.vault.azure.net/"
+
 def get_client_config():
-    """Get the client configuration from either Databricks secrets or local file."""
+    """Get the client configuration from Azure Key Vault."""
     try:
-        # First try to get from Databricks secrets
-        try:
-            client_id = dbutils.secrets.get(scope="youtube-secrets", key="client-id")
-            client_secret = dbutils.secrets.get(scope="youtube-secrets", key="client-secret")
-            print("Using Databricks secrets for authentication")
-        except Exception as e:
-            # If Databricks secrets fail, try to load from local file
-            print("Databricks secrets not available, trying local config file")
-            with open('client_secrets.json', 'r') as f:
-                local_config = json.load(f)
-                client_id = local_config['web']['client_id']
-                client_secret = local_config['web']['client_secret']
-            print("Using local client_secrets.json for authentication")
+        # Create a SecretClient using default Azure credentials (managed identity in Databricks)
+        credential = DefaultAzureCredential()
+        secret_client = SecretClient(vault_url=KEY_VAULT_URL, credential=credential)
+        
+        # Get secrets from Azure Key Vault
+        client_id = secret_client.get_secret("youtube-client-id").value
+        client_secret = secret_client.get_secret("youtube-client-secret").value
         
         config = {
             "web": {
@@ -46,18 +45,11 @@ def get_client_config():
                 ]
             }
         }
-        
-        # Print debug info without exposing secrets
-        debug_config = json.loads(json.dumps(config))
-        debug_config['web']['client_id'] = f"{client_id[:8]}...{client_id[-4:]}"
-        debug_config['web']['client_secret'] = f"{client_secret[:8]}...{client_secret[-4:]}"
-        print("\nConfiguration structure:")
-        print(json.dumps(debug_config, indent=2))
-        
         return config
         
     except Exception as e:
-        print(f"Error getting client configuration: {str(e)}")
+        print("Error accessing Azure Key Vault secrets.")
+        print(f"Error details: {str(e)}")
         raise
 
 def get_credentials() -> Optional[Credentials]:
