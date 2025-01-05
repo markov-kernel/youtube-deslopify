@@ -13,6 +13,7 @@
 # COMMAND ----------
 
 from pyspark.sql import SparkSession
+from pyspark.sql.functions import col
 
 # COMMAND ----------
 # MAGIC %md
@@ -24,13 +25,19 @@ from pyspark.sql import SparkSession
 input_path = "/Volumes/yt-deslopify/default/youtube/channel_statistics.json"
 
 # Read the JSON file into a DataFrame
-df = spark.read.json(input_path)
+df = spark.read.json(input_path, multiLine=True)
 
-# Select and rename columns as needed
-df_final = df.select(
-    df.channel.alias("name"),
-    df.url,
-    df.views
+# Debug: Print schema and show sample data
+print("DataFrame Schema:")
+df.printSchema()
+print("\nSample Data:")
+df.show(5, truncate=False)
+
+# Explode the top_50_channel_urls array and select needed columns
+df_final = df.selectExpr("explode(top_50_channel_urls) as channel_info").select(
+    col("channel_info.channel").alias("name"),
+    col("channel_info.url"),
+    col("channel_info.views")
 )
 
 # COMMAND ----------
@@ -40,7 +47,7 @@ df_final = df.select(
 # COMMAND ----------
 
 # Create the table in Unity Catalog
-table_name = "yt-deslopify.default.channel_statistics"
+table_name = "`yt-deslopify`.default.channel_statistics"
 
 # Create or replace the table
 df_final.write \
@@ -59,4 +66,4 @@ print(f"Successfully created table {table_name}")
 # COMMAND ----------
 
 # MAGIC %sql
-# MAGIC SELECT * FROM yt-deslopify.default.channel_statistics LIMIT 5;
+# MAGIC SELECT * FROM `yt-deslopify`.default.channel_statistics LIMIT 5;
