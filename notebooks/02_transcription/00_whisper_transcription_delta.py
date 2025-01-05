@@ -11,7 +11,7 @@
 # MAGIC 4. Ensures crash resistance and no duplication
 
 # COMMAND ----------
-# MAGIC %pip install transformers torch torchaudio librosa
+# MAGIC %pip install transformers torch torchaudio librosa azure-identity
 
 # COMMAND ----------
 import os
@@ -26,6 +26,8 @@ import torch
 import librosa
 import numpy as np
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
+from azure.storage.blob import BlobServiceClient
+from azure.identity import DefaultAzureCredential
 
 # Optional imports for flash-attn
 try:
@@ -229,12 +231,21 @@ def process_audio_snippet(pipe, snippet_info, container_client):
         chunks = []
         if "chunks" in result:
             for chunk in result["chunks"]:
-                start, end = chunk["timestamp"]
-                chunks.append({
-                    "start": float(start),
-                    "end": float(end),
-                    "text": chunk["text"].strip()
-                })
+                timestamp = chunk.get("timestamp", (None, None))
+                if timestamp and len(timestamp) == 2 and timestamp[0] is not None and timestamp[1] is not None:
+                    start, end = timestamp
+                    chunks.append({
+                        "start": float(start),
+                        "end": float(end),
+                        "text": chunk["text"].strip()
+                    })
+                else:
+                    # If timestamps are invalid, store just the text with 0,0 timestamps
+                    chunks.append({
+                        "start": 0.0,
+                        "end": 0.0,
+                        "text": chunk["text"].strip()
+                    })
         
         # Insert into Delta table
         chunk_array = spark.createDataFrame(chunks).collect()
@@ -281,6 +292,18 @@ def process_audio_snippet(pipe, snippet_info, container_client):
         """)
 
 # COMMAND ----------
+def get_blob_service_client():
+    """Get blob service client with retry logic"""
+    for attempt in range(3):
+        try:
+            account_url = "https://gattacav2.blob.core.windows.net"
+            credential = DefaultAzureCredential()
+            return BlobServiceClient(account_url=account_url, credential=credential)
+        except Exception as e:
+            if attempt == 2:  # Last attempt
+                raise
+            time.sleep(2 ** attempt)  # Exponential backoff
+
 # Initialize Azure blob client
 blob_service_client = get_blob_service_client()  # Reuse function from audio processing
 container_client = blob_service_client.get_container_client("yt-deslopify")
@@ -290,8 +313,8 @@ pipe = initialize_whisper(
     model_id="openai/whisper-large-v3-turbo",
     chunk_length_s=60,
     batch_size=16,
-    use_flash_attn=True,
-    use_torch_compile=True
+    use_flash_attn=False,
+    use_torch_compile=False
 )
 
 # Get pending snippets
